@@ -20,48 +20,77 @@ namespace BestStoriesDetailsHackerNewsAPI.Services
             _apiSettings = apiSettings;
         }
 
-        public async Task<IEnumerable<StoryDto>> GetBestStories(int rank, IMemoryCache cache)
+        private async Task<List<long>> getStoryListFromApi(int rank)
         {
-            var list = new List<StoryDto>();
-            var bestStoriesCacheKey = _apiSettings.Value.CacheKey;
-            var bestStoriesDataCacheKey = $"{bestStoriesCacheKey}_Data";
             var json = await _htppClient.GetStringAsync(_apiSettings.Value.BestStoriesUri);
             if (json.Length > 0)
             {
-                var actualList = JsonSerializer.Deserialize<List<long>>(json).Take(rank).ToList();
-                var cachedData = string.Empty;
-                cache.TryGetValue(bestStoriesCacheKey, out cachedData);
-                var cachedList = string.IsNullOrEmpty(cachedData) ? new List<long>() : JsonSerializer.Deserialize<List<long>>(cachedData);
-                if (cachedList.SequenceEqual(actualList))
-                {
-                    cache.TryGetValue(bestStoriesDataCacheKey, out cachedData);
-                    list = JsonSerializer.Deserialize<List<StoryDto>>(cachedData);
-                }
-                else
-                {
-                    foreach (var id in actualList)
-                    {
-                        var uri = _apiSettings.Value.StoryDetailsUri.Replace("{storyId}", id.ToString());
-                        var storyJson = await _htppClient.GetStringAsync(uri);
-                        if (storyJson.Length > 0)
-                        {
-                            var story = JsonSerializer.Deserialize<Story>(storyJson);
-                            list.Add(new StoryDto
-                            {
-                                Title = story.title,
-                                PostedBy = story.by,
-                                Score = story.score,
-                                Time = DateTimeHelper.ConvertUnixTime(story.time),
-                                Uri = story.url,
-                                CommentCount = story.kids != null ? story.kids.Count() : 0
-                            });
-                        }
-                    }
-                }
-                cache.Set(bestStoriesCacheKey, JsonSerializer.ToJsonString(actualList));
+                return JsonSerializer.Deserialize<List<long>>(json).Take(rank).ToList();
             }
-            cache.Set(bestStoriesDataCacheKey, JsonSerializer.ToJsonString(list));
-            return list;
+            return new List<long>();
+        }
+
+        private async Task<StoryDto> getStoryDetailsFromApi(long storyId)
+        {
+            var uri = _apiSettings.Value.StoryDetailsUri.Replace("{storyId}", storyId.ToString());
+            var storyJson = await _htppClient.GetStringAsync(uri);
+            if (storyJson.Length > 0)
+            {
+                var story = JsonSerializer.Deserialize<Story>(storyJson);
+                return new StoryDto
+                {
+                    Title = story.title,
+                    PostedBy = story.by,
+                    Score = story.score,
+                    Time = DateTimeHelper.ConvertUnixTime(story.time),
+                    Uri = story.url,
+                    CommentCount = story.kids != null ? story.kids.Count() : 0
+                };
+            }
+            return new StoryDto();
+        }
+
+        private List<long> getStoryListFromCache(IMemoryCache cache)
+        {
+            var cachedData = string.Empty;
+            cache.TryGetValue(_apiSettings.Value.CacheKey, out cachedData);
+            return string.IsNullOrEmpty(cachedData) ? new List<long>() : JsonSerializer.Deserialize<List<long>>(cachedData);
+        }
+
+        private List<StoryDto> getCachedStoryDetailsList(IMemoryCache cache)
+        {
+            var cachedData = string.Empty;
+            var storyDetailsCacheKey = $"{_apiSettings.Value.CacheKey}_Data";
+            cache.TryGetValue(storyDetailsCacheKey, out cachedData);
+            return string.IsNullOrEmpty(cachedData) ? new List<StoryDto>() : JsonSerializer.Deserialize<List<StoryDto>>(cachedData);
+        }
+
+        private void setCache(string cacheKey, List<long> storyList, List<StoryDto> storyDetailsList, IMemoryCache cache)
+        {
+            var storyDetailsCacheKey = $"{cacheKey}_Data";
+            cache.Set(cacheKey, JsonSerializer.ToJsonString(storyList));
+            cache.Set(storyDetailsCacheKey, JsonSerializer.ToJsonString(storyDetailsList));
+        }
+
+        public async Task<IEnumerable<StoryDto>> GetBestStories(int rank, IMemoryCache cache)
+        {
+            var actualList = await getStoryListFromApi(rank);
+            var cachedList = getStoryListFromCache(cache);
+            var storyDetailsList = (getCachedStoryDetailsList(cache) ?? new List<StoryDto>()).Take(rank).ToList();
+            if (!cachedList.SequenceEqual(actualList))
+            {
+                for (var i = 0; i < actualList.Count(); i++)
+                {
+                    if (cachedList.Count() >= i + 1)
+                    {
+                        if (actualList[i] != cachedList[i])
+                            storyDetailsList[i] = await getStoryDetailsFromApi(actualList[i]);
+                    }
+                    else storyDetailsList.Add(await getStoryDetailsFromApi(actualList[i]));
+                }
+            }
+            setCache(_apiSettings.Value.CacheKey, actualList, storyDetailsList, cache);
+            return storyDetailsList;
         }
     }
 }
